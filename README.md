@@ -99,6 +99,7 @@
 |26.05.18|멀티스레드 멀티클라이언트 에코서버의 실행 + 개선점|[링크](./EchoServer/[MultiClient%20Echo]%2026.05.18(월)%20멀티스레드%20멀티클라이언트%20에코서버의%20실행%20+%20개선점.md)|
 |26.05.20|Run() 함수를 SendPacket() / RecvPacket() 함수로 분리, 그리고 enum class의 저주|[링크](./EchoServer/[MultiClient%20Echo]%2026.05.20(수)%20Run()%20함수를%20SendPacket()%20_%20RecvPacket()%20함수로%20분리,%20그리고%20enum%20class의%20저주.md)|
 |26.05.25|SessionID 설계와 로그 출력 개선|[링크](./EchoServer/[MultiClient%20Echo]%2026.05.25%20SessionID%20설계와%20로그%20출력%20개선.md)|
+|26.06.06|[MultiClient Echo] 26.06.06(토) InputParser _ ParsedInput, ClientApp|[링크](./EchoServer/[MultiClient%20Echo]%2026.06.06(토)%20InputParser%20_%20ParsedInput,%20ClientApp.md)|
 
 ---
 
