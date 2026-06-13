@@ -30,6 +30,9 @@
 
 ### Computer Architecture - 컴퓨터 구조
 
+|날짜|주제|링크|
+|---|---|---|
+
 ---
 
 ### CS:APP - Computer Systems : A Programmer's Perspective
@@ -54,6 +57,7 @@
 |26.04.22|CS:APP 2.3.1 ~ 2.3.3 정리와 느낀 점|[링크](./CSAPP/[CSAPP]%2026.04.22(수)%20CS_APP%202.3.1%20~%202.3.3%20정리와%20느낀%20점.md)|
 |26.04.25|CS:APP 2.3.4 ~ 2.3.6 정리와 느낀 점|[링크](./CSAPP/[CSAPP]%2026.04.25(토)%20CS_APP%202.3.4%20~%202.3.6%20정리와%20느낀%20점.md)|
 |26.06.09|CS:APP 2.3.7 ~ 2.3.8 정리와 느낀 점|[링크](./CSAPP/[CSAPP]%2026.06.07(일)%20CS_APP%202.3.7%20~%202.3.8%20정리와%20느낀%20점.md)|
+|26.06.13|CS:APP 2.4.1 ~ 2.4.3 정리와 느낀 점|[링크](./CSAPP/[CSAPP]%2026.06.11(목)%20CS_APP%202.4.1%20~%202.4.3%20정리와%20느낀%20점.md)|
 
 ---
 
@@ -101,6 +105,7 @@
 |26.05.20|Run() 함수를 SendPacket() / RecvPacket() 함수로 분리, 그리고 enum class의 저주|[링크](./EchoServer/[MultiClient%20Echo]%2026.05.20(수)%20Run()%20함수를%20SendPacket()%20_%20RecvPacket()%20함수로%20분리,%20그리고%20enum%20class의%20저주.md)|
 |26.05.25|SessionID 설계와 로그 출력 개선|[링크](./EchoServer/[MultiClient%20Echo]%2026.05.25%20SessionID%20설계와%20로그%20출력%20개선.md)|
 |26.06.06|[MultiClient Echo] 26.06.06(토) InputParser _ ParsedInput, ClientApp|[링크](./EchoServer/[MultiClient%20Echo]%2026.06.06(토)%20InputParser%20_%20ParsedInput,%20ClientApp.md)|
+|26.06.11|[MultiClient Echo] 26.06.11(목) 패킷 핸들러와 패킷 처리 정책 리팩토링(설계 문서 복붙)|[링크](./EchoServer/[MultiClient%20Echo]%2026.06.11(목)%20패킷%20핸들러와%20패킷%20처리%20정책%20리팩토링(설계%20문서%20복붙).md)|
 
 ---
 
