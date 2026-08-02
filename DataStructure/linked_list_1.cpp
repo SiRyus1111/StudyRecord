@@ -86,6 +86,7 @@ bool SLList::delete_node(int target) {
         if (current->data == target) {
             previous->next = current->next;
             delete current;
+            return true;
         }
 
         previous = current;
