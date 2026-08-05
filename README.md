@@ -30,6 +30,14 @@
 
 ---
 
+### Chat Server - 채팅 서버 프로젝트
+
+|날짜|주제|링크|
+|---|---|---|
+|26.08.02|[Chat Server] 26.08.02(일) 브로드캐스트 및 브로드캐스트 관련 개편|[링크](./Chat%20Server/[Chat%20Server]%2026.08.02(일)%20브로드캐스트%20및%20브로드캐스트%20관련%20개편.md)|
+
+---
+
 ### Compiler - 컴파일러
 
 |날짜|주제|링크|
@@ -131,6 +139,7 @@
 |26.06.06|[MultiClient Echo] 26.06.06(토) InputParser _ ParsedInput, ClientApp|[링크](./EchoServer/[MultiClient%20Echo]%2026.06.06(토)%20InputParser%20_%20ParsedInput,%20ClientApp.md)|
 |26.06.11|[MultiClient Echo] 26.06.11(목) 패킷 핸들러와 패킷 처리 정책 리팩토링(설계 문서 복붙)|[링크](./EchoServer/[MultiClient%20Echo]%2026.06.11(목)%20패킷%20핸들러와%20패킷%20처리%20정책%20리팩토링(설계%20문서%20복붙).md)|
 |26.06.27|[MultiClient Echo] 26.06.27(토) 멀티클라이언트 에코 마지막, 닉네임 시스템|[링크](./EchoServer/[MultiClient%20Echo]%2026.06.27(토)%20멀티클라이언트%20에코%20마지막,%20닉네임%20시스템.md)|
+|26.08.02|[MultiClient Echo] 26.08.02(일) CAS 로직으로 TryMarkClosing() 개편|[링크](./EchoServer/[MultiClient%20Echo]%2026.08.02(일)%20CAS%20로직으로%20TryMarkClosing()%20개편.md)|
 
 ---
 

@@ -1,0 +1,1282 @@
+# 개시발 좆같은 브로드캐스트 설계..
+
+(이 문서는 위에서 아래로 시간 순으로 작성된 문서가 아님)
+(그때그때 중간에 섹션 끼워넣는 느낌으로 작성됨.)
+((과거 설계) 혹은 비슷한 괄호, 취소선(~~텍스트~~) / 현재 설계와 다르다고 명시된 내용은 현재 구현 기준이 아니다.)
+(클라이언트 / 클라세션 다른말임.)
+(클라이언트 : 사용자가 접속한 클라이언트(`ClientApp`쪽))
+(클라세션 : 서버의 클라이언트 세션(`ClientSession`쪽))
+
+## 0. 프로젝트 요약
+
+(솔직히 이거 분량 너무 많음ㅋㅋ)
+
+1. 서버와 클라이언트의 High-Level 송 / 수신 단위는 `Packet` 구조체로 고정한다.
+2. `Packet` 구조체는 송 / 수신할 때, 최대 4096바이트의 페이로드를 일일히 복사하는건 성능적 측면에서 문제가 있으니
+최소 복사를 만족하도록 `std::shared_ptr<Packet>`의 형태로 전달되며, 그렇게 해당 객체의 수명 문제를 방지한다.
+3. 한 `client_thread`는 해당 `client_thread`가 관리하는 `ClientSession`에 대한 처리만 실행하고, 
+브로드캐스트 과정에서의 타 `ClientSession`에 대한 `SendPacket()`같은 외부 `ClientSession`에 대한 처리는 실행하지 않는다.
+4. `Send Queue`구조를 도입해 `broadcast()` 수행 시 송신 책임을 각 `ClientSession`을 담당하는 `client_thread`에 둠으로써 책임 분리를 수행한다.
+5. `Send Queue`에는 `std::shared_ptr<Packet>`을 담아서, 
+각 `client_thread`가 `SendPacket()`할 `Packet` 구조체의 `shared_ptr`를 꺼내서 처리한다. 
+6. 계속 `std::shared_ptr<Packet>`을 다루는 이유는 해당 `Packet` 구조체의 수명 보장 + 복사(deep copy) 최소화의 목적을 위해서이다. 
+물론 `std::move`(move semantics)를 사용해서 더이상 해당 객체를 소유할 필요가 없는 경우에 추가적인 메모리 할당 비용 없이 해당 객체를 넘겨받을 수 있기 때문이기도 하다.
+즉, 각각의 `Send Queue`에 최대 4096바이트를 초과할 수 있는 `Packet` 구조체를 복사하지 않고, 
+단순히 `std::shared_ptr<Packet>`를 사용해서 오로지 해당 `std::shared_ptr` 객체만 복사해서 
+더 빠르게 `Send Queue`에 해당 `Packet` 구조체를 넘겨주고,
+복사 없이 참조식으로 해당 `Packet` 구조체에 접근해서 빠르게 패킷을 송신할 수 있게 하는 것이다.
+7. 단 하나의 `Send Queue`에도 해당 `std::shared_ptr<Packet>` 구조체가 들어갈 수 있다면,
+해당 `Packet` 구조체는 더이상 수정되면 안된다. 여러 클라이언트에 송신되는 패킷의 내용이 달라질 수 있기 때문이다.
+그래서 패킷 헤더는 상시 네트워크 바이트 정렬로 유지하고, 필요할 때만 원본 `Packet` 객체를 수정하지 않고 별도의 변수에 호스트 바이트 정렬로 저장해서 사용한다.
+8. `Packet` 구조체는 `std::unique_ptr<std::string>`의 형태로 페이로드를 소유한다.
+9. `send_queue_mutex_`는 각 `ClientSession::send_queue`의 `push()` / `pop()`을 수행할 때 잡는다. 
+그리고 `push()` / `pop()` 함수는 해당 `Send Queue`를 조작하는 별도의 함수로 만들어놓고, 해당 `Send Queue`는 `private` 접근지정자로 은닉한다.
+10. 그리고, `1 recv <-> 1 send`의 구조가 아니게 됨에 따라, 서버와 클라이언트에 `recv` 전용 스레드 / `send` 전용 스레드를 각각 둔다.
+11. TOCTOU 문제는 `closing == true`만을 확인하지 않고 `closing` 플래그는 오직 거름망 정도로만 사용해서 아예 송신하면 안될 `ClientSession`을 판별하기 위한 용도로만 쓰고,
+근본적인 TOCTOU 문제에 대한 해결은 `Send Queue` 구조를 사용해서 `SendPacket()`의 책임을 오직 해당 `ClientSession`을 담당하는 `client_thread`만으로 분리해서
+`broadcast()` 함수를 호출한 스레드는 영향을 받을 수 없게 하는 것이다.
+12. 세션 종료에 대한 후처리는 CAS로 종료 권한을 얻은 스레드만 실행한다.
+13. N:M 송수신 해야하므로 서버와 클라이언트의 Send / Recv Thread를 분리한다.
+    - 서버는 메인 스레드에서 계속 입력을 받으므로 두 스레드를 모두 `detach()`하고
+    - 클라이언트는 메인 스레드가 따로 수행하는 작업이 없으므로 끝을 알기 쉬운 Recv Thread를
+    메인 스레드에서 실행하고 Send Thread를 `detach()`한다.
+14. `Send Queue`가 비었을 때는 조건 변수를 사용해서 `wait()`하고,
+`Send Queue`에 `push()` 할 때 `notify_one()`을 호출한다.
+15. 각 스레드에 종료를 전파하는 방식은,
+Send Thread의 경우 `notify_all()`로 
+`wait()`에서 blocking된 스레드를 진행시키고 `closing`을 확인하고,
+Recv Thread의 경우 `shutdown()`으로 
+`recv()`에서 blocking된 스레드를 진행시키고 `closing`을 확인하는 식으로 
+서로의 스레드에 종료를 전파한다..
+
+EX. `RecvPacket()`으로 `Packet` 구조체를 수신할 때,
+
+1. 헤더를 정해진 길이만큼 수신한다.
+2. 수신한 헤더의 `length` 필드를 호스트 바이트 정렬로 바꿔서 저장한다.
+3. 저장한 `length` 필드를 사용해 `std::unique_ptr<std::string> payload`에다가 `resize()`로 받은 페이로드의 바이트수만큼 `size`를 설정한다. (`std::string`은 길이 기반이므로 세그폴트 방지용)
+4. `std::unique_ptr<std::string> payload`에 `data()` 함수를 사용해서 문자열을 저장하는 첫 바이트의 주소를 바로 `Recv()` 함수에 때려넣어서 저장한 `length` 필드의 값만큼 `Recv`한다.
+
+EX. `snapshot` 기반 브로드캐스트는 자세히 설명 안되어있음.
+
+1. `snapshot`을 `clients_mutex`를 잡고 복사한다.
+2. 해당 `snapshot`을 기반으로 브로드캐스트를 진행한다.
+
+## 1. 브로드캐스트의 목적.
+
+- 채팅 서버의 핵심 기능.
+- 채팅 서버의 모든 기능들의 설계적 뼈대.
+- 나중에 이 매커니즘을 기반으로 
+  - 룸 시스템(룸 멤버들한테만 데이터 전송)
+  - 귓속말(특정 상대로의 데이터 전송) 등도 처리될 예정.
+- 그렇기 때문에 확실히 잡아놔야함..
+
+- 송신 정책 : 자신에게는 브로드캐스트 메시지 전송 안함.
+  - 하지만 송신 정책을 자신에게도 전송하는 것으로 바꿀려면 코드를 바로 바꿀 수 있도록 하는 설계 필요.
+  - 이건 어느정도 중요한 정책이라 미리 박아놓음.
+
+## 1-1. 구현 목표
+
+1. deep copy는 최대한 금지
+2. 각 함수에서 일관성있는 처리하기
+3. 예외 상황이 발생했을 때의 영향을 최소화
+4. 객체든 함수든 책임을 명확히 분리
+
+## 2. 브로드캐스트의 단계
+
+1. `ClientSession`에서 패킷 `RecvPacket()` 후 `type == PacketType::CHAT_MESSAGE` 패킷 핸들러(`HandleRecvPacket()`) 호출
+(현재 구조에서는. 추후 다른 채팅 패킷이 추가될 수 있음)
+2. `manager_wp`로 `ClientManager::broadcast()` 호출
+    - ~~broadcast() 함수가 논블로킹이어야함..~~
+    - 그럴 필요 없음. 일단 '송신할 `ClientSession`의 별도의 `Send Queue`에' 송신할 패킷을 하나의 패킷 구조체로 헤더 / 페이로드를 묶어서 넣음
+    (송 / 수신 함수의 시그니처는 바꾸지 않고 그대로 유지함. 현재는 여기까지 개편하는건 좀 의존성이 너무 커진다. 버그 위험도 크게 올라가고..)
+    - 그리고 해당 `ClientSession`을 담당하는 `client_send_thread`가 `Send Queue`의 패킷들을 송신(**이거 중요함. 송신의 주체는 결국 broadcast()를 호출한 스레드가 아니라 해당 ClientSession을 담당하고 있는 스레드.**)
+    - 그러면 이게 `send()` 하는 주체가 하나니까 `send_mutex`는 송신 자체에 거는 락이 아니라
+    `Send Queue`에 `push()` / `pop()` 할 때 걸어야겠네? (**이것도 중요함**)
+      - 이거 `send_mutex`보다 다른 이름을 써야할 듯. 큐에 `push()` / `pop()` 할 때 쓰는 뮤텍스니까..
+    - ~~따로 브로드캐스트 해주는 스레드를 만들고 Manager에서 join? 모르겠다..~~(과거의 설계임. 병신같아서 보존ㅋㅋ)
+3. broadcast() 함수는 clients를 snapshot으로 복사 후 각각의 ClientSession의 ~~SendPacket() 호출~~ `Send Queue`에 입력받은 패킷(`std::shared_ptr<Packet>`) `push()`
+    - 직접 `push()` 하지 않고 해당 `ClientSession`의 별개의 `SendQueuePush()` 함수 사용함
+    - (`Send Queue`의 캡슐화(은닉)를 위해서(오직 해당 함수로만 `Send Queue`에 `push()` 할 수 있음))
+
+이 정도로 요약될 수 있겠네..
+
+> 중요한거 : 각 `client_thread`들은 딱 해당 스레드의 송 / 수신만 책임지고 수행한다. 타 스레드(담당하는 `ClientSession`이외의 타 `ClientSession`)의 송 / 수신 함수는 절대 호출하지 않음.
+> 결국 각 `client_thread`들은 오로지 해당 스레드가 담당한 `ClientSession`만 사용하고, 타 `ClientSession`에 접근할 필요가 있을 때는 `ClientManager`를 거친다.
+
+## 2-1. 그냥 시발 각잡고 송수신 함수 시그니처 Packet 구조체로 통일해버릴까?
+
+```cpp
+struct Packet{
+    PacketHeader header{};
+    std::unique_ptr<std::string> payload_up; // 포인터인거 까먹을까봐 이름 이렇게 함
+
+    // 물론 unique_ptr이 가리킬 객체 생성도 make_unique()로 해줌
+    Packet() : payload_up(std::make_unique<std::string>()) { // 생성자에서 std::string 객체도 생성해서 해당 up에 할당해줌.
+        
+    }
+};
+```
+
+이걸 그냥 `SendPacket()`의 입력값(매개변수),
+`RecvPacket()`의 `RecvResult`에 포함해놓으면 솔직히 개꿀일 듯?
+(`RecvResult`에는 `NetState`도 들어가야하기에 그냥 `Packet`을 반환하면 안됨)
+
+그러니까,
+
+(`SendPacket()` 함수)
+
+1. `SendPacket()` 함수를 사용하기 전에 보낼 패킷의 내용을 정갈하게 `Packet` 구조체에 담는다.
+2. 해당 구조체를 `SendPacket()` 함수에 넣어준다.
+3. `SendPacket()` 함수는 기존 로직을 유지한 채 그냥 해당 구조체의 원소들을 사용하도록 이름만 바꾼다.
+
+(`RecvPacket()` 함수)
+
+- `RecvPacket()` 함수 안에서 반환값을
+  - `NetState`
+  - `Packet`
+- 구성의 `RecvResult` 구조체로 반환한다.
+- 물론, 기록하는 과정도 결국ㅋㅋ
+  - `Packet::header = PacketHeader`
+  - `NetState = recv_state`
+- 이렇게 바꿔주면 그만이라ㅋㅋ
+- 그리고 결국 `Packet::header::type`을 기반으로 패킷 핸들러에 넣어버림 그만이다.
+
+의외로 쉬울 듯.
+
+뭔가 딱 이분되는 느낌..?
+
+- 송수신 과정에서 발생한 상황 기록 : `NetState`
+- 송수신하는 패킷(의 정보에 더 가깝긴 한데ㅋㅋ) : `Packet`
+
+이렇게 `SendPacket()`이든 `RecvPacket()`이든 
+
+- `NetState` 반환(송수신 상태)
+- `Packet` 송신 / 수신(함수마다 다름)
+
+이렇게 두 개만 쓰면 끝! 뭔가 시그니처 통일하는 느낌?
+
+결국 수정해야할 부분이
+
+1. `SendPacket()` 시그니처와 내부를 `Packet` 기반으로 수정
+2. `SendPacket()` 호출하는 곳에 정갈하게 담는 부분 추가
+3. `RecvPacket()` 내부를 위에서 말한 것 처럼 수정
+4. `RecvResult` 수정(위에서 말한 것 처럼)
+5. 그에에엑(더있나?)
+
+### 2-1-1. RecvPacket() 개편안
+
+1. 일단 헤더를 수신했을 때 호스트 바이트 정렬로 바꾸지 않는다.
+    - 여러 개의 `Send Queue`에 해당 `std::shared_ptr<Packet>` 구조체가 들어가 있을 때 해당 `Packet` 구조체가 수정되면 서로 다른 내용을 `SendPacket()` 하게 된다.
+    - 그렇기 때문에, 그냥 `Packet` 구조체에는 헤더를 네트워크 바이트 정렬로 저장하고
+    각 필드를 읽을 필요가 있을 때만 호스트 바이트 정렬로 바꿔서 읽는다.
+2. 해당 패킷의 페이로드를 수신할 때, 어려운 `char* -> std::string`을 최대한 하지 않기 위해서 이런 방식으로 바로 `std::unique_ptr<std::string>` `payload` 객체의 문자열이 시작되는 주소부터 송신한 값을 그대로 꽂아버린다.
+    - 자세한건 섹션 4 - 난관 참조.
+    - 어차피 해당 패킷의 `payload`를 사용하는건,
+    즉 서버에 생성하는건 여기(`RecvPacket()`)서 처음이니까,
+    `std::unique_ptr<std::string>` 객체(`Packet` 객체에 포함됨, 즉 `Packet` 객체를 여기서 만든다는거임.)를 여기서(`RecvPacket()`) 만들고
+    `std::string::resize()`로 `length`만큼 `std::string::size`를 늘려놓은 다음에 `std::string::data()`로 그냥 문자열 표현하는 첫 바이트 주소를 그대로 `recv()`에 꽂아넣어버리는거.
+    - 즉, (너무 길어서 바로 밑의 텍스트 블럭 참조)
+
+```text
+std::shared_ptr<Packet> 객체 생성 
+-> 해당 객체의 header 필드에 헤더 수신 
+-> header 필드의 length를 ntohl()로 호스트 바이트 정렬로 읽어서 payload->resize() 호출로 페이로드 길이만큼 size 값(std::string의 바이트 수) 바꿈 
+-> payload.data()로 수정가능한 페이로드 주소를 그대로 수신 함수에 넘겨서 딱 해당 객체의 header값만큼만 수신 
+
+이런 과정을 거치게 됨.
+
+header 필드가 size() 호출 / ClientSockRecv() 호출 중간에 바뀔 일이 없기 때문에 payload.size 값과 실제 수신하는 바이트 수는 같을 수밖에 없음.
+
+payload.size() 설정과 payload 수신 사이에 header 필드가 변하지 않는 이유는, 
+그 시점의 Packet이 아직 RecvPacket() 지역 내부에만 존재하며 다른 스레드나 객체에 공개되지 않았기 때문이다.
+
+즉, header 필드가 payload.size() 설정과 payload 수신 사이에 변하지 않게 하기 위해서는 
+해당 함수의 외부가 아닌 해당 RecvPacket() 함수 내부만 신경써주면 된다.
+```
+
+```cpp
+// 이 구조체도 이렇게 다시 만들어야함.. 나를 죽이시오 시발
+struct RecvResult{
+    NetState state; // 수신 과정에서 발생한 상태
+    std::shared_ptr<Packet> packet; // 수신한 패킷
+};
+
+// 의사 코드에 가까움..
+RecvResult ClientSession::RecvPacket(){
+    std::shared_ptr<Packet> packet = std::make_shared<Packet>;
+    RecvResult res{};
+
+    // 헤더 수신
+    ClientSockRecv(대충 여따가 &packet->header (packet 구조체의 header 필드 주소), 수신할 길이는 정해진 HEADER_SIZE 씀); // Packet::header에다가 직통으로 바이트열 때려박기
+
+    // 이러면 SendPacket() 할 때 다시 바이트 정렬을 맞춰줘야함. 위의 1번 참고.
+    // 그래서, 해당 PacketHeader 구조체는 네트워크 바이트 정렬이고,
+    // length가 필요할 때는 별도의 변수에 호스트 바이트 정렬로 저장한 후 읽는다(원본을 건드리지 않음)
+    /*
+    packet->header.length = ntohl(packet->header.length); // 대충 바이트 정렬 맞춰주기
+    packet->header.type = ntohl(packet->header.type); // 여기도
+    */
+
+    // 대충 헤더 유효성 검사하는 코드
+    // 유효하지 않다면 대충 이런 코드 실행
+        res.state.protocol_error = true;
+        State.protocol_error = true;
+        return res;
+
+    // 여기서부터는 헤더가 유효해야 실행됨
+
+    packet->payload_up->resize(대충 ntohl(packet->header.length)만큼 해당 std::string 객체 size 필드 설정하는 매개변수);
+    
+    // 페이로드 수신
+    ClientSockRecv(대충 여따가 packet->payload_up->data() 함수로 payload_up의 첫 바이트 넣고, ntohl(packet->header.length)만큼 받으면 됨. 어차피 resize()로 `std::string을 다루는데 할건` 다 되어있음.);
+
+    // 헤더의 값은 변경되지 않으니 resize()할 때의 header.length와 수신할 때의 ClientSockRecv() 함수의 페이로드의 길이 매개변수(length)는 같음.
+    // 자세한건 윗쪽 참조
+
+    res.packet = std::move(packet);
+
+    return res; // 이렇게 해버려도 이미 Packet 구조체에는 길이 정보 / 타입 정보 / 닉네임 / 페이로드 다 들어가있게됨.
+}
+
+```
+
+### 2-1-2. SendPacket() 개편안
+
+```cpp
+// 의사 코드에 가까움..
+
+NetState SendPacket(std::shared_ptr<Packet> packet) {
+
+    // 헤더 송신
+    // packet->header는 이미 네트워크 바이트 정렬임
+    ClientSockSend(대충 여따가 &packet->header, 송신할 길이는 sizeof(PacketHeader) 씀); // Packet::header를 직통으로 송신하기
+
+    // 대충 송신 잘 됐는지 검사하는 코드
+
+    // 여기서부터는 헤더 송신이 잘 된 경우에만 실행됨.
+
+    ClientSockSend(대충 여따가 packet->payload_up->c_str() 함수로 payload_up의 첫 바이트 넣어버리고 ntohl(packet->header.length)만큼 송신하면 됨.)
+}
+```
+
+..뭐야 이것만 해도 되네?ㅋㅋㅋ
+
+## 2-2. 대충 구현 예시
+
+**(이거 `std::shared_ptr<Packet>`을 Send Queue에 넣는 방식으로 바꿔놔야함)**
+
+### 이거 unordered_map은 복사 비용이 너무 높지 않나?
+
+그래서 `GetClients()` 함수 갈아엎음.
+
+vector를 반환하도록.
+자료구조에서 배운 `reserve()` 함수 잘 써먹었음.
+
+```cpp
+std::vector<std::shared_ptr<ClientSession>> GetClients() {
+
+    std::vector<std::shared_ptr<ClientSession>> snapshot;
+    snapshot.reserve(clients.size()); // 미리 clients의 크기 이상만큼 메모리를 할당받아서 추가적인 메모리 할당 최적화
+
+    {
+        std::lock_guard<std::mutex> lock(clients_mutex);
+
+        for (const auto& [id, session_ptr] : clients) {
+            snapshot.push_back(session_ptr);
+        }
+    }
+
+    return snapshot;
+}
+```
+
+요로코롬.
+
+vector는 연속된 메모리 구조라 unordered_map보다는 복사할 때의 메모리 재할당 비용이 훨씬 저렴함.
+미리 `reserve()` 함수로 메모리 할당 받아놓아서 재할당 필요없게 만든 것도 그렇고.
+vector 배웠을 때 배웠던 테크닉 잘 써먹네.
+
+### broadcast() 함수 구현 예시
+
+```cpp
+void ClientManager::broadcast(std::shared_ptr<Packet> p, SessionID sender_id) {
+    auto snapshot = GetClients();
+
+    for (auto& client_info : snapshot) {
+        if (client_info->GetClosing()) { // 송신 정책 1
+            continue;
+        }
+        if (client_info->GetSessionID() == sender_id) { // 송신 정책 2
+            continue;
+        }
+
+        client_info->SendQueuePush(p);
+    }
+}
+```
+
+브로드캐스트 송신 정책 1 : `closing == true`인 `ClientSession`에는 `SendQueuePush()` 자체를 시도하지 않는다.
+브로드캐스트 송신 정책 2 : 송신자(sender)에게는 자신이 보낸 메시지를 전송하지 않는다.
+
+이걸 왜 굳이 스냅샷으로 했냐면,
+락 잡는 시간 최소화를 위해서.
+
+`SendQueuePush()` 함수를 호출하는 것까지 `clients_mutex` 락을 잡고 실행하면 락 잡는 시간이 길어짐.
+그래서 `SendQueuePush()` 함수는 `clients` 목록을 복사한 snapshot에서 호출함.
+
+각 `ClientSession`도 복사된 snapshot의 `shared_ptr`로 수명 보장 됨.
+
+`closing == true` 검사를 통과했지만 더이상 송신할 수 없는 경우에도 `SendQueuePush()`는 호출되지만
+`broadcast()` 함수를 호출한 스레드는 해당 `ClientSession`의 `Send Queue`에 패킷을 넣고 끝이고
+송신 주체는 해당 `ClientSession`의 send thread라
+좀 이따 `closing == true`로 바뀌어서 송신 자체가 안되거나 / 송신을 시도해도 `SOCKET_ERROR` 받고 딱 해당 `ClientSession`의 스레드만 멈추기 때문에 상관없음.
+
+**(아랫쪽 Run() 함수 이렇게 하면 안됨. 섹션 5 보셈.)**
+
+```cpp
+ClientSession::Run(){
+    // 대충 Send Queue가 비어있지 않다면 Send 하는 로직(아마 이게 제일 난관일 듯.)
+}
+```
+
+## 2-3. Send Queue 구조를 선택한 이유
+
+결국 뭐 `broadcast()`함수의 실행 시간을 최소로 줄이기 위해서지 뭐.
+
+1. 위에서 고민했듯 `broadcast()` 함수에서 해당 스레드가 `send()`까지 하게 되면 그 자리에서 너무 오래 blocking됨. 코드가 앞으로 안나감.
+    - 그래서 따로 브로드캐스트 전용 스레드 이야기까지 나온거(위에 고민 과정(시행착오 과정) 있음.)
+2. 그리고 `send()`가 잘 안되는 느린 클라이언트가 있을 때 그 클라이언트가 느림으로써 `broadcast()`의 실행 속도에 너무 큰 영향을 미침.
+3. 그리고 이걸로 `TOCTOU` 문제의 해결책도 구할 수 있음.
+    - 이건 별도의 섹션으로 분리해서 설명함.
+
+### 2-3-1. Send Queue는 어떻게 구현할까?
+
+어떤 정보를 담을지는 두 개 정도의 안이 있음.
+
+1. `Packet` 구조체를 복사로 `push()`하는 구조
+(`std::shard_ptr<std::string>`(`payload`)도 복사되어 넘어감)
+2. 그냥 `Packet` 구조체마저 `std::shared_ptr<Packet>`으로 넘김
+(근데 이러면 그냥 `payload`를 `Packet` 구조체가 `std::unique_ptr<std::string>`으로 가지고 있어도 되지 않을까?)(그래서 그렇게 함, 기존에는 `shared_ptr`로 했었음)
+(그럼 확실히 성능적 이점도 있는데..(매번 `shared_ptr`을 복사하고 `Packet` 객체까지 복사할 필요가 없어짐, `Packet` 객체에는 `PacketHeader`(고정 40바이트)까지 포함되어있으니..))
+(그냥 딱 `std::shared_ptr<Packet>` 객체만 복사해주면 됨 / 게다가 복사할 필요가 없을 때도 있는데, 그 떄는 move semantic 쓰면 오버헤드 제로에 가까워짐.)
+
+그래서 2번 안 선택함.
+
+솔직히 락-프리 해보고싶은데,
+그냥 뮤텍스 쓰자.. 괜히 가오부리다가 쳐망할 가능성 매우 높음..
+
+> 해당 큐에 접근하려면 `send_queue_mutex`를 잡고 `push()` / `pop()`을 수행함.
+
+여기서 딱히 락 범위를 줄일만한 수는 안 보이네.
+그건 직접 락-프리 큐를 구현하면 되긴 함ㅋㅋㅋㅋㅋㅋㅋㅋㅋ
+
+딱 `push()` / `pop()` 시점에만 락을 잡는 정도가 한계일 것 같음(물론 진짜 그게 한계인지는 모름)
+
+대충,
+
+```cpp
+#include <queue>
+
+class ClientSession {
+private:
+    std::mutex send_queue_mutex_; // 해당 락을 잡아야만 send queue에 push() / pop() 가능
+    std::queue<std::shared_ptr<Packet>> send_queue_; // private 접근지정자로 해당 ClientSession의 전용 함수로만 접근 가능하게 함(캡슐화)
+public:
+
+    bool SendQueuePush(std::shared_ptr<Packet>); // 대충 send_queue_mutex_ 잡고 매개변수 push하는 함수
+    std::shared_ptr<Packet> SendQueuePop(); // 대충 send_queue_mutex_ 잡고 pop한 후 결과 반환하는 함수
+}
+```
+
+그리고 이렇게 `private` 접근지정자로 외부에서 바로 해당 `Send Queue`에 접근하는건 막아놓고
+전용 함수로만 접근할 수 있게 해서 해당 큐에 대해 함부로 `push()` / `pop()`하는거 막음.
+
+그러니까 캡슐화(은닉)라는거지.
+
+그리고, `Send Queue`는 힙에다 넣어버리고
+소멸자에서 해제하는 RAII 패턴 적용하는걸로.
+**(아직 바로 위의 코드에는 미반영)**
+
+#### 2-3-1-1. SendQueuePush() 함수의 대략적인 구현
+
+```cpp
+// 대충 의사코드 느낌
+
+// 해당 ClientSession의 Send Queue에 push를 시도하는 함수
+// push 성공 / 실패 구분
+bool ClientSession::SendQueuePush(std::shared_ptr<Packet> packet) {
+
+    {
+        std::lock_guard lock(send_queue_mutex_); // 락 짧게 획득
+
+        if (closing.load(std::memory_order_acquire)) { // closing == true라면 해당 패킷을 해당 ClientSession에 push하면 안되므로 false, 임시로 acquire 사용
+            return false;
+        }
+
+        send_queue_.push(std::move(packet)); // 어차피 해당 패킷을 더 들고있을 필요 없으니 std::move() 사용
+    }
+    
+    SendQueueCV_NotifyOne();
+
+    return true;
+}
+```
+
+#### 2-3-1-2. SendQueuePop() 함수의 대략적인 구현
+
+```cpp
+// 대충 의사코드 느낌
+
+std::shared_ptr<Packet> ClientSession::SendQueuePop(){
+
+    std::lock_guard lock(send_queue_mutex_); // 락 짧게 획득
+
+    std::shared_ptr<Packet> packet = std::move(send_queue_.front());
+    send_queue_.pop();
+
+    return std::move(packet); // 일단 명시적으로 써놓긴 함. 추후 필요시 수정 예정.
+}
+```
+
+## 2-4. Packet 구조체는 어떻게 구성할까?
+
+(이거 `payload`를 `std::unique_ptr<std::string>`을 쓰는 방식으로 바꿔야함.)
+(자세한건 `Send Queue` 구현 부분 참조)
+(그냥 과거 설계라며 덮어버리는 방식으로 해결함.)
+
+(이건 현재 설계 맞음)
+(과거에는 `unique_ptr`이 아닌 `shared_ptr` 썼었음)
+
+```cpp
+struct Packet{
+    PacketHeader header{};
+    std::unique_ptr<std::string> payload_up; // 포인터인거 까먹을까봐 이름 이렇게 함
+    
+    // 물론 unique_ptr이 가리킬 객체 생성도 make_unique()로 해줌
+    Packet() : payload_up(std::make_unique<std::string>()) { // 생성자에서 std::string 객체도 생성해서 해당 up에 할당해줌.
+        
+    }
+};
+```
+
+(이건 과거 설계, 현재는 다른 설계를 쓰고있음)
+`PacketHeader` 구조체는 오직 40바이트만으로 값 복사만으로 처리하는게 다른 소유권 모델을 쓰는 것보다 이득이다.
+하지만 `payload`는 최대 4096바이트까지 가능하기 때문에, 성능적 이점을 위해 값 복사를 하지 않고 포인터를 받은 채 소유권만 넘기는 `std::shared_ptr`를 사용한다.
+(일단 지금은 `std::shared_ptr`을 사용하는 구조를 설계해보고, 도저히 못해먹겠으면 그냥 값 복사로 구현하자..)
+
+이게 `std::string <--> char*`은 값 복사(deep copy) 없이 변환이 가능해야하는게 문제임.
+
+- `std::string::c_str()` : 그냥 해당 `std::string` 객체의 문자열 시작의 주소를 넘겨줌(값 복사 없음)
+- `std::string_view`를 사용하면 `char*`를 복사하지 않고도 바로 `std::string` 형으로 복사가 가능함.
+  - 이래서 `std::shared_ptr<std::string>`이 아닌 `std::shared_ptr<std::string_view>`를 사용하는거.
+  - 아 시발 잠깐 이거 원본 문자열(`char*`)의 수명은 보존이 안되는데?ㅋㅋㅋㅋ
+  - 좆된듯..
+  - **여기는 추후에 좀 더 다듬어야겠다. 이 볼드체 표현은 기록용..**
+  - 여기가 일단 초크포인트인듯..
+  - (추가) : 4번 섹션에 자세한 해결 방법 나와있음..(이거 한정으로 최신 설계)
+
+성능 문제.
+
+(이것도 과거 설계, 현재는 다른 설계 쓰고있음)
+- 그냥 `std::shared_ptr<std::string>` 들고 다니면서,
+  - 계속 해당 `payload`를 들고다닐 필요가 없을 때는 `std::move()`로 소유권 이동시켜서 오버헤드 최소화,
+  - 계속 해당 `payload`를 들고다닐 필요가 있을 때는 `shared_ptr` 객체 복사로 ref count 증감.
+- 이렇게 하다가, `char*`로 바뀔 때는 `c_str()` 이용.
+
+> **결국 이 시점이 왔다. 결국 이 기능을 구현할 때, 페이로드를 다룰 때에 값 복사할 것인지 포인터로 주소만 받을것인지 결정해야한다. 그걸 서버의 모든 페이로드가 쓰이는 곳에다가..** 니미시발
+> 솔직히 이건 일관성 있는게 좋잖아? 어떨 때는 값복사 / 어떨 때는 포인터 값.. 이러면 솔직히 코드 읽기 싫어질 듯.
+> 솔직히 답은 정해져있잖아?ㅋㅋㅋ deep copy는 좀 많이 무거움.. 게다가 최대 4096바이트인데ㅋㅋ 힙에 할당하고.. 그 4096바이트 전체를 복사하고.. 시발 ㅈㄴ 성능 떨어지는 소리가 여기까지 들리네
+> 피똥싸겠네.. 그냥 처음부터 포인터로 전달할걸..
+
+굳이 `shared_ptr`을 사용하는 이유는 해당 `payload`가 여러 클라이언트의 `Send Queue`에서 같은 시점에 참조될 수 있고,
+어느 클라이언트도 해당 `Packet` 구조체를 관측할 수 있는(이게 표현이 좀 애매한데, 그냥 지금 당장은 `SendPacket()` 도중이라고 생각하면 됨.) 도중에 해당 `payload`가 소멸되면 안되기 때문이다.
+
+(여기서부터 현재 설계)
+
+기존 설계에서는 계속 `Packet` 구조체는 복사해야했고,
+`std::shared_ptr<std::string>` `payload`까지 복사되니 좀 그랬는데..(성능적으로)
+
+그냥 `Packet` 구조체를 `RecvPacket()` 할 때 `std::shared_ptr<Packet>`으로 `std::make_shared()`로 생성하고,
+다른 지역(`Send Queue` 등)에서는 해당 `std::shared_ptr<Packet>`을 받아서 처리하면
+소유권 문제 / 댕글링 포인터 문제도 해결됨.
+
+게다가 `Packet` 구조체를 계속 소유할 필요가 없는 지역에서는 그냥 `std::move()`(move semantic)으로 넘겨서
+`std::shared_ptr`의 고질적인 control block의 ref count atomic operation도 없어서 오버헤드 최소화도 쌉가능함.
+
+어차피 해당 `Packet` 구조체가 `std::unique_ptr`로 `payload`를 소유해서 `payload`의 댕글링 포인트 문제도 해결 가능하니까..
+(그리고 `payload`는 이렇게 복사 불가로 맞춰서 실수로 이렇게 무거운 복사를 할 수 없게 만드는 역할도 있고..)
+(해당 `Packet`의 페이로드라는걸 명확히 표시하는 느낌이라고 해야하나?)
+(해당 `Packet`이 '이 페이로드는 내 꺼니까 나만 가지고 있을거야!' 하는 느낌이지.)
+
+아 그리고 애초에 이 구조체가 왜 필요한지 설명이 안되어있네..
+
+처음에 이 구조체를 만들려고 했던건
+'`Send Queue`에 어떤 단위로 메시지를 넣을까'라는 고민에서 시작됐는데..
+그래서 결국 이렇게 패킷 하나(헤더 + 페이로드)의 단위가 필요하게 되어서,
+이 구조체를 만든거임.
+
+겸사겸사 송 / 수신하는 내용의 일관성도 챙기고.
+
+아 그리고 `payload`는 그냥 `std::string` 객체로 할 수도 있었는데
+왜 `std::unique_ptr<std::string>`으로 했냐면,
+복사 막을라고.
+
+이거 함부로 복사하면 성능 떨어질 것 같음 + 내 의도를 확실히 표현하기 위해
+아 이거 위에 적어놨네..
+
+그리고 이거 목적이 이렇다보니까 클라이언트는 `Packet` 기반으로 갈아엎을 필요가 없음..
+어차피 헤더-페이로드 구조 + 바이트 정렬만 맞춰서 송 / 수신하면 됨.
+
+애초에 `Packet` 기반 개편의 목적이 서버 쪽의 `Send Queue`에 패킷을 넣는 단위니까..
+그러니까 목적이 완전 서버 쪽 목적임..
+
+서버쪽 : `Packet` 기반 구조로 개편
+클라이언트쪽 : 기존 구조 유지
+
+### 2-4-1. 대충 소유관계
+
+(아직 윗쪽 섹션(2-4)는 이 사항이 반영 안되어있음)
+(이제 어느정도 반영됨)
+
+```text
+RecvResult
+    └── NetState state <-- 이건 수신 과정이 정상적이었는지 확인용
+    └── std::shared_ptr<Packet> packet <-- 이걸 패킷 핸들러에 넣음
+                    └── PacketHeader header
+                    |       └── int32_t type
+                    |       └── uint32_t length
+                    |       └── nickname   
+                    └── std::unique_ptr<std::string> payload_up
+```
+
+이렇게 하면 패킷을 다른데에 전달할 때
+딱 `shared_ptr<Packet>` 객체만 복사 / 이동으로 처리하면 됨.
+
+굳이 해당 함수나 그런데서(해당 지역에서) 해당 객체를 더 이상 소유할 필요 없으면 해당 `shared_ptr<Packet>` 객체를 `std::move()`(move semantic)로 이동시켜버려서
+굳이 control block의 ref count 안 올리고 `std::shared_ptr<Packet>` 객체의 추가적인 메모리 할당 없이 빠르게 소유권 이동 가능.
+
+패킷 핸들러는 `std::shared_ptr<Packet>` 객체를 받음.
+그러면 굳이 패킷 객체를 복사할 필요 없이 처리할 수 있음.
+
+즉, `Packet` 객체는 복사되지 않고,
+`Send Queue`에 들어갈 때 까지도 `std::shared_ptr`로 들어감.
+
+즉, 각 클라세션의 `Send Queue`가
+동일한 `Packet` 구조체를 참조하고 있는거지.
+`std::shared_ptr`을 쓰니까 댕글링 포인터 문제도 막을 수 있고.
+
+그리고 솔직히 여기서 순환 참조가 발생할 가능성은 없으니 `std::weak_ptr`은 필요 없을 듯.
+물론 애초에 약한 참조 자체가 필요 없을 듯. 무조건 강한 참조만 써야할 것 같음.
+
+그러니까, 결국 타 클라세션에서 `SendPacket()` 한다고 해도
+거기서 해당 `std::shared_ptr<Packet>` 객체가 사라지면 ㅇㅋ임.
+
+### 2-4-2. 브로드캐스트 과정에서의 소유관계
+
+(도저히 텍스트로 그림 못그리겠어서 이 문서를 기반으로 지피티가 그려줌)
+
+```text
+(Packet 구조체 관점)
+(ClientSession C에는 shared_ptr 복사라는 텍스트를 넣을 공간이 없어서 안 넣은 것 뿐임)
+(#42같은 식별자는 실제 구현에는 없음. 특정 패킷 하나에 대한 내용임을 보여주기 위한 의도.)
+
+[ 이번 CHAT_MESSAGE 브로드캐스트 1회 ]
+
+                     std::shared_ptr<Packet>
+                             │
+                             ▼
+                  ┌───────────────────────┐
+                  │       Packet #42      │  ← 실제 Packet 객체는 단 하나.
+                  │───────────────────────│
+                  │ PacketHeader header   │  ← 값으로 포함
+                  │   - type              │
+                  │   - length            │
+                  │   - nickname          │
+                  │                       │
+                  │ unique_ptr<string>    │
+                  │       payload_up      │  ← Packet이 payload를 단독 소유(복사 방지)
+                  └───────────────────────┘
+                    ▲         ▲         ▲
+                    │         │         │
+     shared_ptr 복사│         │         │shared_ptr 복사
+                    │         │         │
+        ┌───────────┘         │         └───────────┐
+        │                     │                     │
+        ▼                     ▼                     ▼
+┌────────────────┐  ┌────────────────┐  ┌────────────────┐
+│ ClientSession B│  │ ClientSession C│  │ ClientSession D│
+│   Send Queue   │  │   Send Queue   │  │   Send Queue   │
+│─────────────── │  │─────────────── │  │─────────────── │
+│ [shared_ptr] ──┼──┼────────────────┼──┼────────────────┤  ← 각 Send Queue가 같은 Packet 구조체를 shared_ptr로 공유 소유.
+└────────────────┘  └────────────────┘  └────────────────┘
+
+※ 각 큐에는 Packet의 복사본이 들어가지 않는다.
+※ 각 큐 원소는 같은 Packet #42를 공동 소유하는 shared_ptr<Packet> 하나다.
+※ 어느 세션의 송신 스레드가 pop() 후 SendPacket()을 마치고
+  해당 shared_ptr을 버려도, 다른 큐나 스레드가 참조 중이면 Packet은 살아 있다.
+```
+
+(이것도 지피티가 그려준거)
+
+```text
+(한 ClientSession 관점의 브로드캐스트)
+
+ClientSession B의 Send Thread
+
+Send Queue
+[shared_ptr<Packet #42>]
+          │ pop()
+          ▼
+local shared_ptr<Packet #42>
+          │
+          ▼
+SendPacket(*packet)
+          │
+          ▼
+local shared_ptr 소멸
+
+→ B가 참조를 놓아도 C, D의 큐가 아직 Packet #42를 참조하면
+  Packet과 payload는 소멸하지 않음.
+→ 즉, 모든 스레드가 SendPacket()을 성공하든 실패하든 완료하기 전에는 해당 Packet은 소멸하지 않음.
+```
+
+그리고 지금 암시적으로 나타나는 규칙이 있는데, 여기서 명시적으로 나타냄.
+
+> `Packet`은 `broadcast()`에 넘기기 전까지만 수정 가능하고, `Send Queue`에 들어간 뒤(`broadcast()` 함수 호출 후)부터는 불변이다.
+> 즉, 해당 `Packet` 구조체가 수정될 수 있는건 해당 시점에 어떤 `Send Queue`에라도 전달될 가능성이 존재하지 않은 경우임.
+> $\forall {packet} (IfPushSendQueue(packet) \to \neg ModifyPacket(packet))$(**이거 명제 제대로 써야함!!!!!!!!!!!!**)
+
+
+> 하지만, 해당 시점에 어떤 `Send Queue`에라도 전달될 가능성이 존재하지 않은 경우에는 해당 `Packet` 구조체를 수정할 수 있음.
+> 즉, `Packet`은 딱 `Send Queue`에 올라가지 않는다는 것이 보장되는, 현재 브로드캐스트 구조에서는 `ClientManager::broadcast()` 함수에 넘기기 전까지만 수정 가능하다는 것임.
+
+ㅇㅋ?
+
+여러 송신 스레드가 같은 `Packet` 구조체를 읽게되니까,
+`SendPacket()`은 `Packet` 구조체의 `header` / `payload`를 수정하면 안됨.
+
+(잠만 그러면 네트워크 바이트 정렬 변환은 어캄?)
+(이게 바이트 정렬 변환 전 / 후 둘다 필요함)
+(호스트 바이트 정렬 : 해당 패킷을 보낼 때 몇 바이트를 보내야하는지(`length`) 알아야됨)
+(그러니까 제약이 해당 수신한 패킷에 대한 `broadcast()` 호출 후에 원본 Packet 구조체에 쓰기(store)하면 안된다는거니까..)
+(일단 기본은 네트워크 바이트 정렬로 미리 설정해놓고 `length`만(일반화하면 헤더의 필드를 읽어야할 때만) 호스트 바이트 정렬로 해석하자.)
+**(이거 위의 RecvPacket() 의사 코드에 반영 필요함)**
+(반영 완료)
+
+## 3. 필요한 동기화
+
+(이 부분은 과거에 작성됨)
+스냅샷 복사할 때 clients_mutex 잡아야할 듯.
+온전히 해당 상태에서의 clients를 복사하는게 좋을 듯.
+어차피 ClientSession들은 shared_ptr로 생존 보장됨.
+
+각 ClientSession::SendPacket()을 실행할 때의 ClientSession별 send_mutex_를 잡아야함.
+병목 최소화. 패킷 뒤섞임 방지.
+하나의 패킷을 해당 ClientSession에 온전히 전달해야함.
+
+## 3-1. closing == true 확인과 실제 send() 사이의 TOCTOU 문제
+
+(이 부분은 과거에 작성됨)
+closing == true와 실제 전송 간의 레이스 컨디션..
+이건 시발 모르겠다. TOCTOU 문제..
+그러니까 closing == true 확인 시점과 실제 패킷 전송 시점이 달라서 생기는 문제인데,
+이거는 사실상 브로드캐스트의 최종 보스일 듯..(아님ㅋㅋ 병신ㅋㅋ)
+SendPacket() 중 발생한 에러를 처리하는 방향으로 하자.
+해당 에러 외에 SendPacket() 에서 다른 에러가 발생할 경우의 수가 있는가? 명제로 한번 보자..
+
+SendPacket() 중 발생한 에러는 해당 `ClientSession` / `client_thread` 내부에서 처리함.
+
+(여기부터 최근에 작성됨)
+
+> 한 줄 요약 : 이게 앞에서 운 띄웠듯 `Send Queue`를 쓰면 해결됨.
+
+1. 일단 이게 어려웠던게 결국 해당 클라이언트는 무조건 종료해야함. `SendPacket()`하겠다고 해당 클라이언트 세션을 더 살려놓을 수는 없음.
+    - 그래서, 결국 `closing == true` 확인은 그냥 무식하게 `SendPacket()`하지 못하게 하는 거름망 정도로 인식하자.
+      - 거름망에 의도하는 모든게 다 걸러진다는 보장은 없잖아?
+    - 그래서 결국, TOCTOU 문제의 해결책(솔직히 해결책은 아님, TOCTOU 문제를 해결하는건 아님)은 `closing`이 마킹이 안됐는데 `SendPacket()`가 들어오면 서버에서 그냥 해당 `ClientSession`을 종료하면 됨..
+    - 어차피 `SendPacket()`하면
+      - transport error일 경우 `SendPacket()`가 `SOCKET_ERROR`를 뱉어서 `HandleTransportException()` 행이고,
+      - protocol error일 경우에는 `SendPacket()` 자체는 성공하지만 결국 이미 `HandleTransportException()`이 호출되는건 확정이라 해당 `ClientSession`은 종료되게됨.
+2. 근데 기존의 문제는 해당 `SendPacket()` 작업이 영향을 끼치는게 `ClientManager::broadcast()`를 호출한 스레드까지였다는거..
+    - 이게 왜 그렇냐면 결국 `ClientManager::broadcast()` 함수에서 `SendPacket()`까지 담당하니까, `ClientManager::broadcast()`를 호출한 스레드에 영향을 주게 됨..
+3. 하지만 `Send Queue`를 사용하면 책임 분리가 확실히 잘 됨.
+    - `ClientManager::broadcast()` : 그냥 해당 `ClientSession`의 `Send Queue`에 `std::shared_ptr<Packet>` 객체 넣고 끝.
+    - 그 도중에 해당 `ClientSession`의 종료 상황이 발생해도 그 문제가 `ClientManager::broadcast()` 함수까지 번지지 않음.
+    - 종료 상황에서도 결국 `ClientSession` 객체의 `Send Queue`는 `ClientManager::broadcast()` 함수가 들고있는 스냅샷의 `std::shared_ptr` 때문에 생존이 보장됨. 댕글링 포인터같은 문제 발생하지 않음.
+4. 그러니까, 결국 `SendPacket()`의 주체가 `ClientManager::broadcast()`를 호출한 스레드가 아닌 해당 `ClientSession`을 담당하고 있는 스레드니까 굳이 불똥이 `ClientManager::broadcast()`를 호출한 스레드까지 안 튀는거.
+    - 댕글링 포인터같은 예외 상황도 `std::shared_ptr`덕분에 잘 막히고.
+
+## 3-2. 굳이 `send_mutex`는 패킷 뒤섞임 방지를 할 필요가 없고, 그냥 `Send Queue`에 대한 동기화만 수행하면 ㅇㅋ임.
+
+섹션 제목 그대로
+어차피 해당 클라이언트에 대한 서버에서의 송신 주체가 오직 하나인데,
+패킷 뒤섞임을 방지할 필요가 없음.
+
+- 패킷 뒤섞임이 발생하는 조건 : 여러 송신 주체가 해당 클라이언트에 `SendPacket()`함.
+- 근데 어차피 이렇게 `Send Queue`구조로 송신 주체를 해당 `ClientSession`을 담당하고 있는 스레드만 해당 클라이언트에 `SendPacket()`할 수 있게 하니까
+패킷 뒤섞임이 발생하는 조건이 만족이 안됨.
+
+> 그래서, `ClientSession::send_mutex`는 여러 스레드가 동시에 `pop()` / `push()` 할 수 있는 `Send Queue`의 동기화만 수행한다.
+
+> 그리고 이거 이름 바꿔야 할 듯. `send_mutex`가 아니라, `send_queue_mutex`로. 뭐에 대한 뮤텍스인지 변수명으로 정확히 명시할 필요가 있을 듯.
+
+## 4. 난관
+
+1. `char*` -> `std::string` 변환 시 값 복사 문제
+    - 이걸 최우선으로 해결해야함. 이걸 먼저 결정해서 구현을 해놔야 뒤의 브로드캐스트 설계 및 구현이 쉬워짐.
+    - 결국 데이터를 어떻게 다룰까의 문제다보니까.. 쩔수 없음. 이걸 무조건 1순위로 해놔야함.
+    - 솔직히 `std::vector<char>` 쓰는건 좀 무섭..
+    - 이게 `std::string`을 `char*`로 복사 없이 바꾸는건 쉬운데
+    `char*`을 `std::string`으로 복사 없이 바꾸는건 어려워서
+    최대한 `std::string` -> `char*`만 필요하도록 짜면 됨.
+    - 결국 이게 `char*`만 써야 하는 경우는 `send()` / `recv()`밖에 없으니,
+    이 두 경우에서 `std::shared_ptr<std::string>`을 넘겨주면 ㅇㅋ일듯.
+      - `SendPacket()` 간단. `std::string::c_str()` 쓰면 끝.
+      - `RecvPacket()`은 헤더에서 `length` 파싱한 후 `resize()`를 사용해서 정확히 그 길이만큼 `payload`를 설정하고.. 뭐 이런 식. 자세한건 구글 AI 검색 참조.[링크](https://share.google/aimode/kXuIa72B1w1Zf6x4b) (이거 안 봐도 됨. 바로 밑에 설명 써있음.) 
+      - 어차피 해당 패킷의 `payload`를 사용하는건, 즉 서버에 생성하는건 여기(`RecvPacket()`)서 처음이니까, `std::unique_ptr<std::string>` 객체(`Packet` 객체에 포함됨, 즉 `Packet` 객체를 여기서 만든다는거임.)를 여기서(`RecvPacket()`) 만들고
+      `std::string::resize()`로 `length`만큼 `std::string::size`를 늘려놓은 다음에 `std::string::data()`로 그냥 문자열 표현하는 첫 바이트 주소를 그대로 `recv()`에 꽂아넣어버리는거.
+2. 지피티 대화 참조. 프로젝트 폴더에 있고, 브로드캐스트 설계 개선 컨텍스트임. 이거 뭐라고 설명 못하겠다..
+    - 피곤해..
+
+### 4-1. 중복 종료에 대한 위험성
+
+이게
+
+```text
+만약 SendPacket()하는 도중에 closing == true돼서 해당 세션이 종료 상태가 된다면 어찌해야할까?
+뭔가 double close같은 문제가 터질 것 같은데..
+
+첫 HandleTransportException() 호출
+-> 도중에 전송 -> 실패
+-> 한번 더 해당 후처리 함수가 호출될 수 있음
+
+이거 어캄?
+```
+
+이런 문제가 발생할 수 있어서 고민 좀 해봤음.
+
+결국,
+
+1. double close 문제가 생길 수 있는 부분은 `ClientSession::MarkClosing()` / `ClientSession::RemoveThisClient()` 밖에 없음.
+2. `MarkClosing()` -> `RemoveThisClient()` 순으로 진행됨.
+3. 즉, `MarkClosing()` 원자적 연산으로 `closing.store(true)` 할 때,
+그냥 무작정 하지 않고 `compare_exchange_strong()`으로 CAS 연산을 수행해서
+바꾸는(swap) 시점에 이미 `closing == true`라면 `closing` 안 바꾸기 + `RemoveThisClient()` 호출 안하게 하면 됨.
+
+이 정도로 결론이 나겠다..
+
+근데 이게 지금
+
+- `MarkClosing()` 호출 : `Run()`(미래에는 `Recv_Run()`) 내부의 종료 필요 검증 조건문 내부
+- `HandleTransportException()` 호출 : `Run()` 내부
+- `RemoveThisClient()` 호출 : `HandleTransportException()` 내부
+
+```text
+Run() {
+    (수신)
+    if (수신한 패킷에 문제가 있는 경우) {
+        MarkClosing();
+        HandleTransportException();
+    }
+}
+
+HandleTransportException(){
+    (대충 처리 과정(double close 문제와 의존성 없음))
+
+    (코드 마지막)
+    RemoveThisClient();
+    return;
+}
+```
+
+이렇게 호출되는 위치가 분리되어있어서
+
+`MarkClosing()` CAS 연산 실패를 `RemoveThisClient()`를 호출하는 `HandleTransportException()` 함수에서 관측할 수 없음.
+
+어차피 순서도 `MarkClosing()` -> 바로 `HandleTransportException()`인지라,
+그냥 `MarkClosing()`을 `HandleTransportException()` 안으로 넣어버리고,
+`MarkClosing()`의 반환값을 `bool`로 CAS 연산의 성공 / 실패, 즉 이미 `closing == true`인지 아닌지를 받아서
+`RemoveThisClient()` 함수를 호출할지 / 안할지 결정함.
+
+근데 이거 뭔가 `std::mutex`에서 `lock()` 함수같음..
+
+- 원자적 연산
+- CAS 연산
+- 딱 한번만 시도해보고 아니면 안함(뮤텍스에서는 blocking, 여기서는 RemoveThisClient() 안 호출함)
+
+비슷함.
+
+```cpp
+// Run() 함수 내부의 MarkClosing() 호출은 제거
+
+// 대충 의사 코드 느낌
+bool TryMarkClosing() {
+    bool expected = false; // closing == false라면 바꿔도 됨(즉, expected 값)
+
+    if (!closing.compare_exchange_strong(expected, true)) {
+        return false; // CAS 실패
+    }
+
+    return true; // CAS 성공
+}
+
+void HandleTransportException(NetState& state) {
+    bool if_can_close = MarkClosing();
+
+    // 대충 후처리 수행하는 코드들
+
+    if (!if_can_close){
+        return;
+    }
+
+    RemoveThisClient();
+
+    return;
+}
+```
+
+근데 이거 뭔가 뮤텍스에서 원자적으로 락 잡는 느낌이네..
+
+그리고 이거 `MarkClosing()` 함수 이름 바꿈. `TryMarkClosing()`으로.
+그래야 CAS 시도하고 실패하면 `false`를 `return`하는 느낌이 더 살지 않겠음?
+
+#### 결론
+
+딱 결론만, 이 설계에서 나온 최종 결론이라고 보면 되겠지.
+
+- `MarkClosing()`과 `RemoveThisClient()`는 세트다.
+- `MarkClosing()`를 CAS 연산으로 해서 이미 누가 `closing == true`로 바꿔놨으면
+`RemoveThisClient()`도 이미 호출된 것으로 생각해서 해당 함수를 호출하지 않는다.
+
+### 4-2. 종료해야하는 상황이 발생했을 때 send / recv thread 각각 종료되어야함
+
+이게 솔직히 정말 난관일듯.
+
+서버든 클라이언트든 종료해야하는 상황이 발생했을 때, 해당 클라세션의 send / recv thread 둘 다 종료되어야함.
+
+결국 종료해야하는 상황을 판별하기 제일 좋은게,
+`closing` 플래그임.
+
+1. 어차피 논리적 종료 상태를 나타내는게 `closing` 플래그임
+2. 즉, 종료해야하는 상황에서는 무조건 `closing == true`가 되어있음, 되어있어야 함.
+
+이걸 보고 두 스레드가 각각 종료될 수 있다면 좋을 듯.
+
+타이밍 차이나는건 괜찮음.
+어차피 `closing` 변수와 `RemoveThisClient()`만 타이밍 차이나게(두 번) 호출되지만 않으면 됨.
+
+그저,
+
+$IsClosing(session) \to \exists t (RecvClosed(session) \land SendClosed(session))$
+
+시발 명제 어케쓰냐.
+
+이게 내 의도가,
+
+1. 해당 클라이언트 세션에 대한 두 스레드가 서로 영향을 미치는건 없다.
+2. 그래서, 두 스레드의 종료 시점은 별개가 되어도 된다.
+3. 하지만, `closing == true`라면 두 스레드는 전부 종료되어야한다.
+
+이거인데..
+
+역시 자연어 -> 명제는 어렵다..
+
+#### 4-2-1. Send Thread 해결책
+
+결국 이게 큐가 비어있을 때는 blocking된다는게 문제인데
+이거 어차피 condition variable로 `notify_one()` 하고 `closing` 검사하면 끝일 듯?
+
+```cpp
+// 의사 코드에 가까움, 실제 코드와 문법과는 차이 있을 수 있음
+
+// 종료하는 곳(TryMarkClosing()을 호출하는 곳)
+void recv_run(){
+    // 대충 다른 코드들
+
+    if (대충 종료해야하는 조건) {
+        HandleTransportException();
+        SendQueueCV_NotifyAll(); // 여기서 cv.notify_all()
+    }
+}
+
+// cv는 send queue / send thread의 condition variable
+
+void send_run() {
+    while (!(closing.load() || !send_queue_.empty())) { // !closing && send_queue_.empty()
+        cv.wait();
+    }
+
+    if (closing == true) {
+        // 대충 종료하는 코드
+    }
+}
+```
+
+이렇게..
+
+#### 4-2-2. Recv Thread 해결책
+
+이게 좀 어려운데..
+결국 지금 blocking network I/O인지라..
+
+`recv()`에서 blocking됨.
+
+강제로 `recv()` 탈출시켜줄 수 있는 그런게 필요한데..
+
+결국 `shutdown()` 함수로 `closesocket()`을 호출할 시 발생할 수 있는
+double close를 예방하는 쪽으로 해야할 듯.
+
+그리고 다른 곳에서 해당 소켓에 대해 `shutdown()` 함수를 호출하면
+`recv()` 탈출이 되니까(물론 `SOCKET_ERROR`나 0을 뱉기야 하지만)..
+
+(`ClientSession` / `ClientApp`이 소유하고 있는 `ClientSocket` / `ConnectSocket`이 RAII 객체라서
+여기서 임의로 `closesocket()` 해버리면 double close 문제가 발생할 수 있음)
+
+주의점으로는, 이게 `shutdown()`이든 `closesocket()`이든 단 한번만 호출되야한다는거.
+
+`closesocket()` : `ClientSocket` / `ConnectSocket` 소멸자에서 호출
+`shutdown()` : `TryMarkClosing()`에서 CAS로 한번만 호출되게 함 - `closing`을 바꾼 스레드만 `shutdown()` 및 `RemoveThisClient()` 호출 가능
+
+```cpp
+// 의사 코드에 가까움, 실제 코드와 문법과는 차이 있을 수 있음
+
+// 종료하는 곳(TryMarkClosing()을 호출하는 곳)
+void send_run(){
+    // 대충 다른 코드들
+
+    if (대충 종료해야하는 조건) {
+        HandleTransportException();
+        ClientSockShutdown(); // 추후에 신설할 RAII 객체의 메서드. shutdown() 함수를 호출해줌. TryMarkClosing() 함수에 영향을 받게 설정할까 고민 중.
+    }
+}
+
+void recv_run() {
+    RecvResult res = RecvPacket(); // 여기가 blocking인거 탈출!
+
+    if (대충 종료해야하는 조건) {
+        HandleTransportException();
+        SendQueueCV_NotifyOne(); // 이거 그냥 임시로 박아놓음.
+    }
+}
+```
+
+## 5. Send thread랑 Recv thread를 따로 둬야 함
+
+기존에는 Run() 함수 내에 서버 / 클라이언트 공통으로
+
+```text
+1 RecvPacket <-> 1 SendPacket
+```
+
+이 보장이 됐는데,
+
+브로드캐스트에서는
+
+(클라이언트 : 사용자가 조작하는 클라이언트 / 클라세션 : 서버의 클라이언트 세션)
+
+1. 한 클라이언트만 계속 메시지를 보내서 계속 Recv는 되는데
+다른 클라이언트들은 메시지를 안보내서 해당 클라세션에는 Send가 호출이 안될 수도 있고
+2. 해당 클라이언트가 Send는 안하는데 다른 클라이언트에서 계속 메시지를 보내서
+해당 클라세션에는 Recv가 호출이 안될 수도 있고
+
+(물론 클라이언트에서도 비슷한 상황이 생길 수 있고)
+
+이런 상황이 발생할 수 있어서
+
+> 서버 / 클라 모두 SendPacket 전담 스레드 / RecvPacket 전담 스레드를 분리하는 것이 필요함.
+
+그리고 종료 상황도 중요할 듯.
+
+Send thread / Recv thread 둘 다에서
+`std::shared_ptr<ClientSession>` 객체가 사라져야하니,
+
+한쪽에서 발생한 오류를 다른 쪽으로 전파해주는 구조가 필요함.
+
+이게 `RemoveThisClient()`는 그저 `ClientManager`의 관리 목록(`clients`)에서 해당 `ClientSession`의 `std::shared_ptr`를 제거해서 ref count를 1 낮출 뿐,
+해당 `ClientSession` 객체의 제거를 담당하지 않고,
+
+결국 해당 `ClientSession` 객체의 제거 타이밍은 모든 `std::shared_ptr`이 제거돼서 ref count가 0이 되는 타이밍이니까..
+
+### 5-1. ClientSession과 ClientApp에 condition variable이 있어야 함.
+
+결국 Send Queue가 비어있을 때는 send thread가
+해당 `std::condition_variable`로 blocking되는게 효율적임.
+스핀락보다는 훨씬..
+
+그리고 Send Queue에 원소가 들어갔을 때 `notify_one()`로 해당 스레드를 깨워주는 식으로..
+
+그리고 이걸 `ClientSession` / `ClientApp`이 소유하고 있어야
+
+- 객체 내부에서는 그냥 바로 쓰면 되고
+- 객체 외부에서도 인터페이스 함수로 해당 `cv`에 대한 `notify_one()`을 할 수 있을 테니까
+
+이렇게 함.
+
+객체 외부에 있거나 해당 객체의 함수의 지역 변수로 가지고 있으면
+이런거 못함.
+
+지역 변수라면 해당 스코프를 벗어나면 바로 소멸,
+외부에 있으면 해당 객체외 밀접한 관련이 있는 해당 `cv`를 내부에서 조작 못함.
+
+```cpp
+class ClientSession{ // ClientApp도 이런 식으로..
+private:
+    // ...
+    std::condition_variable send_queue_cv_;
+    std::queue<std::shared_ptr<Packet>> send_queue_;
+    std::mutex send_queue_mutex_;
+    // ...
+public:
+    // ...
+    void SendQueueCV_NotifyOne(){
+        // 대충 send_queue_cv_의 notify_one()을 호출하는 함수
+    }
+    void SendQueueCV_NotifyAll(){
+        // 대충 send_queue_cv_의 notify_all()을 호출하는 함수
+    }
+}
+```
+
+### 5-2. SendPacket() 전담 스레드 구조(서버)
+
+1. Send Queue를 확인하며(condition variable 사용, 너무 어렵다면 그냥 스핀락 하자..)
+Send Queue가 비어있지 않다면 해당 패킷을 해당 클라 세션에 SendPacket() 실행
+
+```cpp
+void send_run() {
+    while (true){
+        while (!(closing.load() || !send_queue_.empty())) { // !closing && send_queue_.empty()
+            send_queue_cv_.wait();
+        }
+
+        if (closing == true) {
+            return;
+        }
+
+        std::shared_ptr<Packet> packet = SendQueuePop();
+
+        NetState send_res = SendPacket(packet);
+
+        if (send_res 뭐시기){
+            HandleTransportException();
+        }
+    }
+}
+```
+
+### 5-3. RecvPacket() 전담 스레드 구조(서버)
+
+1. blocking으로 기다리다가 해당 클라 세션에서 송신 시
+RecvPacket() 실행 후 패킷 핸들러로 처리
+
+```cpp
+void recv_run() {
+    while (true) {
+        RecvResult recv_res = RecvPacket();
+
+        if (closing == true) { // 다른 스레드에서 바꾼거 확인용
+            return;
+        }
+        if (recv_res 뭐시기) {
+            HandleTransportException();
+            SendQueueCV_NotifyAll();
+        }
+
+        HandleRecvPacket(std::move(recv_res.packet));
+
+        if (closing == true) { // HandleRecvPacket() 에서 바꾼거 확인용
+            return;
+        }
+    }
+}
+
+```
+
+### 5-4. SendPacket() 전담 스레드 구조(클라이언트)
+
+서버와 달리 클라이언트는 송신 트리거가 사용자 키보드 입력 하나뿐이라
+Send Queue / send_queue_mutex / send_queue_cv가 필요 없음
+사용자 입력을 기다리는 blocking 호출 자체가 서버의 notify_one()과 같은 역할을 함.
+
+`ClientApp`을 `ClientSession`처럼 `std::enable_shared_from_this<ClientApp>`으로 관리함.
+recv/send 스레드가 각각 `shared_from_this()`로 사본을 들고 있으므로,
+어느 한쪽이 먼저 스코프를 벗어나도 다른 쪽이 참조 중이면 객체가 파괴되지 않음.
+(ClientSession과 동일한 원리: shared_ptr 기반 수명 보장)
+
+Send 스레드는 detach()로 분리함.
+
+### 5-5. RecvPacket() 전담 스레드 구조(클라이언트)
+
+Recv 스레드는 별도로 분리하지 않고, 초기 닉네임 설정을 마친 현재 스레드(main)가 그대로 이어서 담당함.
+서버 accept 루프처럼 메인 스레드를 비워줘야 할 이유가 없기 때문에,
+recv를 위해 굳이 새 스레드를 만들 필요가 없음.
+
+### 5-6. 클라이언트 종료 시점
+
+RecvRun()이 리턴하면 (연결 종료 감지) main()도 곧바로 리턴하며 프로세스가 종료됨.
+이때 detach된 send 스레드가 아직 표준입력에서 블로킹 중일 수 있는데,
+
+- ClientApp이 shared_ptr로 관리되므로 파괴된 객체 참조(UB)는 발생하지 않음
+- 다만 send 스레드가 마무리 작업 없이 프로세스 종료와 함께 그냥 죽는다는 점은 감수함
+  (정교한 종료 프로토콜은 너무 구조가 복잡해질 것 같아서 지금 단계에서 의도적으로 보류함)
+
+### 5-7. 클라이언트 로그 출력
+
+이게 클라이언트가 기존에는 `1 recv <-> 1 send` 기반으로 짜여있어서
+
+```text
+Connected to the server.
+Please enter your nickname (Maximum 32Bytes): ㅇㅋ
+[ServerMessage]Your nickname has been successfully changed.
+Default nickname set.
+Message to send (Maximum 4096 Bytes) : 이거 어쩌냐
+Message to send (Maximum 4096 Bytes) : [EchoFromServer]이거 어쩌냐
+디버깅이 아니라 그냥 원인은 뻔히 보이는데 어떻게 고쳐야할지를 모르겠는데
+Message to send (Maximum 4096 Bytes) : [EchoFromServer]디버깅이 아니라 그냥 원인은 뻔히 보이는데 어떻게 고쳐야할지를 모르겠는데
+```
+
+구현 단계에서 로그가 이렇게 찍히는 불상사가 발생함.
+
+근데 이거 구조적으로 발생할 수 밖에 없는 문제고,
+TUI같은거 따로 쓰기에는 너무 오버킬이라
+그냥 로그 좀 지저분해지는거 감수하기로 함..
+
+입력 받는 로그를 Recv한 결과를 출력할 때마다 한 번씩 더 출력해주는걸로 타협함.
+
+```cpp
+// HandleRecvPacket() 안, CHAT_MESSAGE 케이스
+case PacketType::CHAT_MESSAGE:
+{
+    LineLogger::GetInstance().WriteChatLog(res.nick, res.payload);
+    LineLogger::GetInstance().WriteInputLog("Message to send (Maximum 4096 Bytes) : "); // 메시지 찍은 직후 프롬프트 다시 그려주기
+    break;
+}
+```
+
+```text
+Connected to the server.
+Please enter your nickname (Maximum 32Bytes): 오케이
+[ServerMessage]Your nickname has been successfully changed.
+Default nickname set.
+Message to send (Maximum 4096 Bytes) : 이거 잘 되나?
+Message to send (Maximum 4096 Bytes) : [EchoFromServer]이거 잘 되나?
+Message to send (Maximum 4096 Bytes) : 잘 되네..
+Message to send (Maximum 4096 Bytes) : [EchoFromServer]잘 되네..
+Message to send (Maximum 4096 Bytes) : 잘 되는 것 같은데?
+Message to send (Maximum 4096 Bytes) : [EchoFromServer]잘 되는 것 같은데?
+Message to send (Maximum 4096 Bytes) :
+```
+
+이렇게 출력됨.
+
+## 6. 작업 순서
+
+> 왜 이런걸 하냐면,
+> 현재 서버에서 패킷이 이동하는 기본 표현과 흐름 자체를 갈아엎는 리팩토링까지 같이 하기 때문에,
+> 리팩토링과 신 기능 구현을 명확히 분리해야함.
+> 리팩토링 -> 신 기능 구현(recv / send thread, `Send Queue`, `Broadcast`)
+
+1. `Packet` 구조체와 변경된 `RecvResult` 구조체 기반으로 `SendPacket()` / `RecvPacket()` / `HandleRecvPacket()` 함수 위주 수정(다른 의존성 있으면 그것도 처리)
+    - 이 때는 아직 Echo Server 단계.
+    - 어쨌든 `Packet` 구조체 도입과 관련있는 모든 작업을 함.
+      - `MarkClosing()` double close 방지 리팩토링도 포함.
+2. `Send Queue`와 캡슐화를 위한 `SendQueuePush()` / `SendQueuePop()` 함수 구현
+    - 여기가 Echo Server와 Chat Server의 경계
+    - 딱 `Send Queue`와 관련있는 모든 작업만 함.
+3. send / recv thread
+    - Echo Server와 Chat Server의 경계.
+    - send / recv thread와 관련있는 모든 작업을 함.
+4. `Broadcast` 기능 구현
+    - 완전히 Chat Server로 넘어감.
+    - 브로드캐스트 관련 모든 작업을 함.
+
+## 7. 이 기능의 의존성
+
+1. `Packet` 구조체 도입 관련 의존성
+2. `Send Queue`, send / recv thread 도입 관련 의존성
+3. `Broadcast` 도입 관련 의존성
+
+이렇게 세 부분으로 나뉜다.
+
+### 7-1. `Packet` 구조체 도입 관련 의존성
+
+1. `RecvResult`를 사용하는 모든 곳
+    - `SendPacket()` / `RecvPacket()` 함수
+    - 패킷 핸들러(`HandleRecvPacket()`). 후처리 함수(`HandleTransportException()`)는 `NetState`만을 받기에 해당되지 않음
+      - 모든 case에 대해 의존성 있는지 파악 필요
+2. `SendPacket()` / `RecvPacket()` / `HandleRecvPacket()`과 관련있는 모든 곳
+    - 현재는
+      - `Run()` 함수 : `RecvPacket()` / `HandleRecvPacket()`을 사용함
+    - 이 정도밖에 안 떠오름.
+
+### 7-2. `Send Queue`, send / recv thread 도입 관련 의존성
+
+(의존성 정리하기 너무 어려움..)
+
+1. Socket RAII 객체(ClientSock / ConnectSock) : `SocketRAII.h` 헤더파일
+    - 전용 `shutdown()` 함수 필요함
+2. `ClientSession`에 `send_queue` queue 신설
+    - 해당 Send Queue에 대한 인터페이스 함수 신설
+3. `ClientSession`에 `send_queue_mutex` mutex 신설
+4. `ClientSession`에 `send_queue_cv` condition variable 신설
+    - 해당 cv에 대한 인터페이스 함수 신설(`notify_all()` 포함, `wait()` 제외)
+5. 기존 `Run()` 함수를 `RecvRun()` / `SendRun()` 함수로 분리
+    - 분리로 인한 새 로직 추가
+      - condition_variable 관련
+      - Send Queue 관련
+6. 스레드 생성하는 부분에 의존성 있음
+    - 서버 / 클라이언트 공통
+    - 여긴 따로 봐야할 듯.
+7. `TryMarkClosing()`에 `ClientSockShutdown()` 함수 호출하고 `notify_all()` 하는 구조 만들어야함
+8. Send가 일어나는 모든 곳
+    - `SendPacket()` 대신에 `SendQueuePush()`로 대체해야함.
+
+### 7-3. `Broadcast` 도입 관련 의존성
+
+1. `ClientSession`
+    - `HandleRecvPacket()` - `CHAT_MESSAGE`쪽에 브로드캐스트 로직 추가
+2. `ClientManager`
+    - `broadcast()` 함수 추가
+
+여기서 더 할만한게 있나?
+
+## 8. 수정할 부분
+
+### 8-1. `Packet` 구조체 도입 관련
+
+1. `RecvPacket()` : `Packet` 구조체 기반으로 수정
+2. `SendPacket()` : `Packet` 구조체 기반으로 수정
+3. `RecvResult` : `Packet` 구조체를 기존의 필드들 대신 사용하도록 수정
+4. `HandleRecvPacket()` : `CHAT_MESSAGE` / `NICKNAME_CHANGE`
+5. `HandleTransportException()` : protocol error 처리 부분(`SendPacket()`을 함)
+
+### 8-2. `Send Queue`, send / recv thread 도입 관련
+
+(이 도입의 목적 : 기존의 1:1 송 / 수신 로직을 N:M이 가능하도록 개편. 브로드캐스트는 하지 않음)
+
+1. `SocketRAII.h` 헤더파일 : `shutdown()` 함수 추가
+2. `ClientSession::send_queue` : 추가 및 인터페이스 함수(`SendQueuePop()` / `SendQueuePush()`) 추가
+3. `ClientSession::send_queue_mutex` : 추가
+4. `ClientSession::send_queue_cv` : 추가 및 인터페이스 함수(`SendQueueCV_NotifyOne()` / `SendQueueCV_NotifyAll()`) 추가
+5. `Run()` -> `SendRun()` / `RecvRun()`으로 분리(윗쪽 예시 코드 참고)
+6. (Server) `main()` / `client_thread` : 기존 `client_thread`에서 `send_thread` / `recv_thread`로 나눠서 실행하는 구조 필요
+7. (Client) `main()` : 기존의 `main()` 함수에서 다 실행하던 형태에서 `send_thread` / `recv_thread`로 나눠서 실행하는 구조 필요
+8. `TryMarkClosing()` : `ClientSockShutdown()` 함수 호출하고 `notify_all()` 하는 구조 만들어야함
+9. `HandleRecvPacket()` / `HandleTransportException()` : `SendPacket()` 이 일어나는 부분 `SendQueuePush()`로 대체
+
+### 8-3. `Broadcast` 기능 도입 관련
+
+1. `ClientManager` : `broadcast()` 함수 추가
+2. `ClientSession` : `CHAT_MESSAGE` 케이스에서 `broadcast()` 함수 기반으로 개편
+3. `ClientManager::GetClients()` 갈아엎기
+
+## 9. 불변식들
+
+1. 공개된 `Packet`은 절대 수정하지 않는다.
+2. `PacketHeader`의 정규 표현은 네트워크 바이트 정렬이다.
+3. 한 세션의 실제 `SendPacket()` 호출자(송신 주체)는 하나뿐이다.
+4. 각 스레드는 자신이 담당하는 세션만 직접 조작한다.
+5. `Send Queue`는 전용 인터페이스와 mutex를 통해서만 접근한다.
+6. `closing`을 `false` -> `true`로 바꾸는 **종료 권한**은 한 스레드만 얻는다.
+7. 종료 권한을 얻은 스레드만 `shutdown()`과 `RemoveThisClient()`를 수행한다
+8. `closing` 상태가 되면 send/recv thread가 결국 모두 종료되어야 한다.
