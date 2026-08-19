@@ -101,6 +101,14 @@
 
 ---
 
+### Design Patterns - 디자인 패턴
+
+|날짜|주제|링크|
+|---|---|---|
+|26.08.18|[디자인 패턴] 26.08.18(화) Command 패턴|[링크](./DesignPatterns/[디자인%20패턴]%2026.08.18(화)%20Command%20패턴.md)|
+
+---
+
 ### Discrete Mathematics - 이산 수학
 
 #### Rosen 이산수학
