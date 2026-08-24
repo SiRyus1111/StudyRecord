@@ -22,16 +22,12 @@
 |26.05.07|스레드 관련 라이브러리(thread, promise, future)|[링크](./C++/[C++%20Standard%20Library]%2026.05.07(목)%20스레드%20관련%20라이브러리(thread,%20promise,%20future).md)|
 |26.07.25|std::condition_variable|[링크](./C++/[C++]%2026.07.25(토)%20std__condition_variable.md)|
 
-#### 메모리 모델(인가?)
-
-|날짜|주제|링크|
-|---|---|---|
-|26.06.17|동기화 라이브러리 기본(1)(Atomicity / Visibility / Ordering 기반의 std::mutex / std::atomic)|[링크](./C++/[C++]%2026.06.15(월)%20동기화%20라이브러리%20기본(Atomicity%20_%20Visibility%20_%20Ordering%20기반의%20std__mutex%20_%20std__atomic).md)|
 
 #### Concurrency
 
 |날짜|주제|링크|
 |---|---|---|
+|26.06.17|동기화 라이브러리 기본(1)(Atomicity / Visibility / Ordering 기반의 std::mutex / std::atomic)|[링크](./C++/[C++]%2026.06.15(월)%20동기화%20라이브러리%20기본(Atomicity%20_%20Visibility%20_%20Ordering%20기반의%20std__mutex%20_%20std__atomic).md)|
 |26.08.13|[C++ 동시성] 26.08.13(목) C++ Concurrency in Action 1 ~ 2챕터 요약|[링크](./C++/[C++%20동시성]%2026.08.13(목)%20C++%20Concurrency%20in%20Action%201%20~%202챕터%20요약.md)|
 |26.08.14|[C++ 동시성] 26.08.14(금) C++ Concurrency in Action - 3. Sharing data Between Threads 정리|[링크](./C++/[C++%20동시성]%2026.08.14(금)%20C++%20Concurrency%20in%20Action%20-%203.%20Sharing%20data%20Between%20Threads%20정리.md)|
 
@@ -85,6 +81,12 @@
 |26.06.13|CS:APP 2.4.1 ~ 2.4.3 정리와 느낀 점|[링크](./CSAPP/[CSAPP]%2026.06.11(목)%20CS_APP%202.4.1%20~%202.4.3%20정리와%20느낀%20점.md)|
 |26.06.29|CS:APP 26.06.29(월) CS:APP 2.4.4 ~ 2.4.6 정리와 느낀 점|[링크](./CSAPP/[CSAPP]%2026.06.29(월)%20CS_APP%202.4.4%20~%202.4.6%20정리와%20느낀%20점.md)|
 |26.07.12|CS:APP 26.07.12(일) CS:APP 2.5 요약 및 느낀 점 ~ Homework Problem 풀어보기|[링크](./CSAPP/[CSAPP]%2026.07.12(일)%20CS_APP%202.5%20요약%20및%20느낀%20점%20~%20Homework%20Problem%20풀어보기.md)|
+
+#### CS:APP - 3. Machine-Level Representation of Programs
+
+|날짜|주제|링크|
+|---|---|---|
+|26.08.24|[CS:APP] 26.08.24(월) CS:APP 3장 튜토리얼(3.2)|[링크](./CSAPP/[CSAPP]%2026.08.24(월)%20CS_APP%203장%20튜토리얼(3.2).md)|
 
 ---
 
