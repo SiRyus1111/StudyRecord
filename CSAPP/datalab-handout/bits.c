@@ -169,7 +169,7 @@ int isTmax(int x) {
   x = ~x; // TMax라면 0x80000000(TMin)
   int n = ~x + 1; // ~TMin + 1 = TMin인걸 이용(TMin을 제외한 다른 수는 성립 안함)
   
-  return !(n ^ x); // ~x와 n이 같으면 1을 반환, 아니라면 0을 반환
+  return !(n ^ x) & !!x; // ~x와 n이 같으면 1을 반환, 아니라면 0을 반환 + ~x가 0인 경우 방지
 }
 /* 
  * allOddBits - return 1 if all odd-numbered bits in word set to 1
@@ -180,7 +180,13 @@ int isTmax(int x) {
  *   Rating: 2
  */
 int allOddBits(int x) {
-  return 2;
+  int mask = 0xAA;
+  mask = (mask << 8) | 0xAA; // 0xAAAA
+  mask = (mask << 8) | 0xAA; // 0xAAAAAA
+  mask = (mask << 8) | 0xAA; // 0xAAAAAAAA
+  
+  int result = mask & x;
+  return !(result ^ mask);
 }
 /* 
  * negate - return -x 
@@ -203,7 +209,17 @@ int negate(int x) {
  *   Rating: 3
  */
 int isAsciiDigit(int x) {
-  return 2;
+  // 0x30 <= x <= 0x39
+  int start = 0x30;
+  int end = 0x39;
+
+  // 0x29 - x < 0
+  int cond1 = !((x + (~start + 1)) >> 31); // 부호 비트만 절삭
+
+  // x - 0x40 < 0
+  int cond2 = !((end + (~x + 1)) >> 31); // 부호 비트만 절삭
+
+  return cond1 & cond2;
 }
 /* 
  * conditional - same as x ? y : z 
@@ -213,7 +229,9 @@ int isAsciiDigit(int x) {
  *   Rating: 3
  */
 int conditional(int x, int y, int z) {
-  return 2;
+  int mask1 = ((!!x) << 31) >> 31; // x가 참일 때
+  int mask2 = ((!x) << 31) >> 31; // x가 거짓일 때
+  return (y & mask1) | (z & mask2);
 }
 /* 
  * isLessOrEqual - if x <= y  then return 1, else return 0 
@@ -223,7 +241,25 @@ int conditional(int x, int y, int z) {
  *   Rating: 3
  */
 int isLessOrEqual(int x, int y) {
-  return 2;
+  // y - x >= 0
+  // x <= y고 y가 x보다 크거나 같은 경우니까..
+  // ~(SF ^ OF) & ~ZF 이거 생각나는데..
+  
+  // 2차 해결
+  // x <= y니까
+  // x가 y보다 작거나 같아야 함.
+  // x - y <= 0
+  // x - y의 결과를 기준으로 (SF ^ OF) | ZF여야 하는데..
+  int sign_flag = ((x + (~y + 1)) >> 31) & 0x1;
+
+  int x_sign = (x >> 31) & 0x1;
+  int y_sign = (y >> 31) & 0x1;
+
+  int zero_flag = !(x + (~y + 1));
+
+  int overflow_flag = (x_sign ^ y_sign) & (sign_flag ^ x_sign);
+
+  return (sign_flag ^ overflow_flag) | zero_flag;
 }
 //4
 /* 
