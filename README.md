@@ -31,6 +31,7 @@
 |26.08.13|[C++ 동시성] 26.08.13(목) C++ Concurrency in Action 1 ~ 2챕터 요약|[링크](./C++/[C++%20동시성]%2026.08.13(목)%20C++%20Concurrency%20in%20Action%201%20~%202챕터%20요약.md)|
 |26.08.14|[C++ 동시성] 26.08.14(금) C++ Concurrency in Action - 3. Sharing data Between Threads 정리|[링크](./C++/[C++%20동시성]%2026.08.14(금)%20C++%20Concurrency%20in%20Action%20-%203.%20Sharing%20data%20Between%20Threads%20정리.md)|
 |26.10.15|[C++ 동시성] 26.10.12(월) C++ Concurrency in Action 4챕터 - Synchronizing concurrent operations 정리(1)|[링크](./C++/[C++%20동시성]%2026.10.12(월)%20C++%20Concurrency%20in%20Action%204챕터%20-%20Synchronizing%20concurrent%20operations%20정리(1).md)|
+|26.10.18|[C++ 동시성] 26.10.15(목) C++ Concurrency in Action 4챕터 - Synchronizing concurrent operations 정리(2)|[링크](./C++/[C++%20동시성]%2026.10.15(목)%20C++%20Concurrency%20in%20Action%204챕터%20-%20Synchronizing%20concurrent%20operations%20정리(2).md)|
 
 ---
 
