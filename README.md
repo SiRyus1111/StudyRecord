@@ -32,6 +32,7 @@
 |26.08.14|[C++ 동시성] 26.08.14(금) C++ Concurrency in Action - 3. Sharing data Between Threads 정리|[링크](./C++/[C++%20동시성]%2026.08.14(금)%20C++%20Concurrency%20in%20Action%20-%203.%20Sharing%20data%20Between%20Threads%20정리.md)|
 |26.10.15|[C++ 동시성] 26.10.12(월) C++ Concurrency in Action 4챕터 - Synchronizing concurrent operations 정리(1)|[링크](./C++/[C++%20동시성]%2026.10.12(월)%20C++%20Concurrency%20in%20Action%204챕터%20-%20Synchronizing%20concurrent%20operations%20정리(1).md)|
 |26.10.18|[C++ 동시성] 26.10.15(목) C++ Concurrency in Action 4챕터 - Synchronizing concurrent operations 정리(2)|[링크](./C++/[C++%20동시성]%2026.10.15(목)%20C++%20Concurrency%20in%20Action%204챕터%20-%20Synchronizing%20concurrent%20operations%20정리(2).md)|
+|26.10.25|[C++ 동시성] 26.10.18(일) C++ Concurrency in Action 5챕터 - The C++ memory model and operations on atomic types 정리|[링크](./C++/[C++%20동시성]%2026.10.18(일)%20C++%20Concurrency%20in%20Action%205챕터%20-%20The%20C++%20memory%20model%20and%20operations%20on%20atomic%20types%20정리.md)|
 
 ---
 
