@@ -230,6 +230,7 @@
 |26.08.06|[운영체제] 26.08.06(목) OSTEP Concurrency - 28. Locks 정리와 느낀 점|[링크](./OperatingSystems/[운영체제]%2026.08.06(목)%20OSTEP%20Concurrency%20-%2028.%20Locks%20정리와%20느낀%20점.md)|
 |26.11.11|[운영체제] 26.11.07(토) OSTEP Virtualization - 13 / 15 ~ 17 정리|[링크](./OperatingSystems/[운영체제]%2026.11.07(토)%20OSTEP%20Virtualization%20-%2013%20_15%20~%2017%20정리.md)|
 |26.11.12|[운영체제] 26.11.11(수) OSTEP Virtualization - 18 ~ 20 정리|[링크](./OperatingSystems/[운영체제]%2026.11.11(수)%20OSTEP%20Virtualization%20-%2018%20~%2020%20정리.md)|
+|26.11.13|[운영체제] 26.11.13(금) OSTEP Virtualization - 21 ~ 22 정리|[링크](./OperatingSystems/[운영체제]%2026.11.13(금)%20OSTEP%20Virtualization%20-%2021%20~%2022%20정리.md)|
 
 ---
 
