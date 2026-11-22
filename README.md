@@ -273,6 +273,8 @@
 |26.11.20|백준 1149 - RGB 거리|[링크](./ProblemSolving/boj1149.cpp)|
 |26.11.20|벡준 1920 - 수 찾기|[링크](./ProblemSolving/boj1920.cpp)|
 |26.11.21|백준 2606 - 바이러스|[링크](./ProblemSolving/boj2606.cpp)|
+|26.11.22|백준 1753 - 최단경로|[링크](./ProblemSolving/boj1753.cpp)|
+|26.11.22|백준 1654 - 랜선 자르기|[링크](./ProblemSolving/boj1654.cpp)|
 
 ---
 
