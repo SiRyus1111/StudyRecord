@@ -275,6 +275,7 @@
 |26.11.21|백준 2606 - 바이러스|[링크](./ProblemSolving/boj2606.cpp)|
 |26.11.22|백준 1753 - 최단경로|[링크](./ProblemSolving/boj1753.cpp)|
 |26.11.22|백준 1654 - 랜선 자르기|[링크](./ProblemSolving/boj1654.cpp)|
+|26.11.22|백준 1504 - 특정한 최단 경로|[링크](./ProblemSolving/boj1504.cpp)|
 
 ---
 
