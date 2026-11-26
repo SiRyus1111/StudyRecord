@@ -282,7 +282,8 @@
 |26.11.23|백준 1697 - 숨바꼭질|[링크](./ProblemSolving/boj1697.cpp)|
 |26.11.23|백준 11404 - 플로이드|[링크](./ProblemSolving/boj11404.cpp)|
 |26.11.24|백준 1932 - 정수 삼각형|[링크](./ProblemSolving/boj1932.cpp)|
-|26.11.24|백준 1991 - 트리 순회|[링크](./ProblemSolving/boj1991.cpp)|
+|26.11.25|백준 1991 - 트리 순회|[링크](./ProblemSolving/boj1991.cpp)|
+|26.11.26|백준 7576 - 토마토|[링크](./ProblemSolving/boj7576.cpp)|
 
 ---
 
